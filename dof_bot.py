@@ -109,53 +109,70 @@ def _safe(v):
 def parse_report(file_bytes: bytes, filename: str) -> dict:
     """
     Парсит XLS/XLSX отчёт конвейерных весов.
-    Возвращает:
-      {
-        'period': 'c 1 по 15',
-        'month_label': 'Текущий/Предыдущий',
-        'daily': {день: {kv4:.., kv3:.., ...}},   # суточные
-        'totals': {kv4:.., kv3:.., ...},           # итоги за период
-        'sheets_found': [...]
-      }
+    Работает в оперативной памяти, безопасно для Linux/Railway хостингов.
     """
-    # Конвертируем .xls → .xlsx через LibreOffice если нужно
+    # 1. ОБРАБОТКА СТАРОГО ФОРМАТА .XLS ЧЕРЕЗ XLRD (БЕЗ SOFFICE)
     if filename.lower().endswith(".xls"):
-        import subprocess, shutil
-        tmp = tempfile.mkdtemp()
-        src = os.path.join(tmp, "report.xls")
-        with open(src, "wb") as f: f.write(file_bytes)
-        subprocess.run(
-            ["soffice","--headless","--convert-to","xlsx",src,"--outdir",tmp],
-            capture_output=True
-        )
-        out = os.path.join(tmp, "report.xlsx")
-        if os.path.exists(out):
-            with open(out,"rb") as f: file_bytes = f.read()
-        shutil.rmtree(tmp, ignore_errors=True)
+        # Читаем книгу из байт напрямую
+        wb_xls = xlrd.open_workbook(file_contents=file_bytes)
+        sheet_names = wb_xls.sheet_names()
+        
+        result = {"period": "", "month_label": "", "daily": {}, "totals": {}, "sheets_found": sheet_names}
+        
+        # Определяем целевой лист для суточных данных
+        target_sheets = ["ДетТекМесяц", "ТекМесяц", "ДетСменТекМесяц"]
+        used_sheet = sheet_names[0]
+        for sh in target_sheets:
+            if sh in sheet_names:
+                used_sheet = sh
+                break
+                
+        ws_xls = wb_xls.sheet_by_name(used_sheet)
+        
+        # Переводим строки xlrd в обычный список кортежей/списков, как это делает openpyxl
+        rows = []
+        for r_idx in range(ws_xls.nrows):
+            row_vals = [ws_xls.cell_value(r_idx, c_idx) for c_idx in range(ws_xls.ncols)]
+            rows = rows + [row_vals]
+            
+        # Для итогов за период (totals)
+        totals_sheet = "ТекМесяц" if "ТекМесяц" in sheet_names else used_sheet
+        ws2_xls = wb_xls.sheet_by_name(totals_sheet)
+        rows2 = []
+        for r_idx in range(ws2_xls.nrows):
+            row_vals = [ws2_xls.cell_value(r_idx, c_idx) for c_idx in range(ws2_xls.ncols)]
+            rows2 = rows2 + [row_vals]
 
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    # 2. ОБРАБОТКА НОВОГО ФОРМАТА .XLSX ЧЕРЕЗ OPENPYXL
+    else:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        sheet_names = wb.sheetnames
+        
+        result = {"period": "", "month_label": "", "daily": {}, "totals": {}, "sheets_found": sheet_names}
+        
+        target_sheets = ["ДетТекМесяц", "ТекМесяц", "ДетСменТекМесяц"]
+        ws = None
+        used_sheet = ""
+        for sh in target_sheets:
+            if sh in sheet_names:
+                ws = wb[sh]
+                used_sheet = sh
+                break
+        if ws is None:
+            ws = wb[sheet_names[0]]
+            used_sheet = sheet_names[0]
+            
+        rows = list(ws.iter_rows(values_only=True))
+        
+        totals_sheet = "ТекМесяц" if "ТекМесяц" in sheet_names else used_sheet
+        ws2 = wb[totals_sheet]
+        rows2 = list(ws2.iter_rows(values_only=True))
 
-    result = {"period":"", "month_label":"", "daily":{}, "totals":{}, "sheets_found": wb.sheetnames}
-
-    # Читаем лист ДетТекМесяц (детально по дням, текущий)
-    # или ТекМесяц если детального нет
-    target_sheets = ["ДетТекМесяц", "ТекМесяц", "ДетСменТекМесяц"]
-    ws = None
-    used_sheet = ""
-    for sh in target_sheets:
-        if sh in wb.sheetnames:
-            ws = wb[sh]
-            used_sheet = sh
-            break
-
-    if ws is None:
-        # Попробуем первый лист
-        ws = wb[wb.sheetnames[0]]
-        used_sheet = wb.sheetnames[0]
-
-    rows = list(ws.iter_rows(values_only=True))
-
-    # Найти строку с датами (row где row[0]=="Дата:")
+    # ========================================================
+    # 3. ЕДИНАЯ ЛОГИКА ПАРСИНГА (работает одинаково для XLS и XLSX)
+    # ========================================================
+    
+    # Найти строку с датами
     date_row_idx = None
     for i, row in enumerate(rows):
         if row and str(row[0]).strip() in ("Дата:", "Дата"):
@@ -170,7 +187,8 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
     days = []
     for v in date_row[1:]:
         try:
-            d = int(v)
+            # Предотвращаем падение, если в xlrd число считалось как float (например, 1.0)
+            d = int(float(v))
             days.append(d)
         except:
             pass
@@ -189,18 +207,14 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
 
     result["daily"] = daily
 
-    # Итоги за период — ищем в листе ТекМесяц
-    totals_sheet = "ТекМесяц" if "ТекМесяц" in wb.sheetnames else used_sheet
-    ws2 = wb[totals_sheet]
-    rows2 = list(ws2.iter_rows(values_only=True))
-
+    # Итоги за период
     totals = {}
     period_str = ""
     for row in rows2:
         if not row: continue
         # Период
         if str(row[0]).strip() == "Период:":
-            period_str = str(row[1]).strip() if len(row)>1 else ""
+            period_str = str(row[1]).strip() if len(row) > 1 else ""
         # Конвейер X: значение
         name = str(row[0]).strip()
         key = CONV_MAP.get(name) or CONV_MAP.get(name.rstrip())
@@ -215,7 +229,6 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
     result["used_sheet"] = used_sheet
 
     return result
-
 # ════════════════════════════════════════════════════════
 #  БАЗА ДАННЫХ
 # ════════════════════════════════════════════════════════
