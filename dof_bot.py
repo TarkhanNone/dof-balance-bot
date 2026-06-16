@@ -7,6 +7,8 @@ import logging
 import tempfile
 from datetime import datetime, date, timedelta
 from typing import Optional
+import xlrd
+import openpyxl
 
 # Подключаем библиотеки для секретов (.env) и Excel
 from dotenv import load_dotenv
@@ -26,7 +28,6 @@ from aiogram.types import (
 )
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # ════════════════════════════════════════════════════════
