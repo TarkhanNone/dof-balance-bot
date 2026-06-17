@@ -227,7 +227,7 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
             period_str = str(row[1]).strip() if len(row) > 1 else ""
             continue
         key = CONV_MAP.get(name) or CONV_MAP.get(name.rstrip())
-        if key and len(row) > 1:
+        if key && len(row) > 1:
             v = _safe(row[1])
             if v > 0: totals[key] = v
 
@@ -348,7 +348,6 @@ async def handle_report(msg: Message):
         now = datetime.now()
         saved_days, current_incomplete_day = db_save_daily(parsed, msg.from_user.id, doc.file_name, now.year, now.month)
         
-        # Точное число полных дней из файла
         total_full_days = current_incomplete_day - 1 if current_incomplete_day > 0 else 0
         
         await wait_msg.edit_text(
@@ -363,34 +362,31 @@ async def handle_report(msg: Message):
         logging.error(f"Сбой: {e}")
         await wait_msg.edit_text(f"❌ Сбой обработки: {e}")
 
-# ── КНОПКА: СУТОЧНЫЙ БАЛАНС (СТРОГО ЗА ПОСЛЕДНИЕ ПОЛНЫЕ СУТКИ) ──
+# ── КНОПКА: СУТОЧНЫЙ БАЛАНС (ВОЗВРАЩЕНА ТАБЛИЦА С % ИЗ DOF_BOT_OLD) ──
 @dp.message(F.text == "📅 Суточный баланс")
 async def report_daily(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
+    # Фильтруем только полные закрытые сутки
     complete_rows = [r for r in rows if r["is_complete"] == 1]
     
     if not complete_rows:
         return await msg.answer("❌ В базе нет завершённых суток.")
         
-    last_full_day = complete_rows[-1]
-    diff = last_full_day["kv4"] - last_full_day["kv4d"]
-    diff2 = last_full_day["kv3"] - last_full_day["kv3d"]
+    text = f"📊 *Суточный баланс за {now.month:02d}/{now.year} (тонны):*\n\n"
+    text += "`День | Конв.4  | Конв.4Д | Отклон. %`\n"
+    text += "─────────────────────────────\n"
     
-    text = (
-        f"📅 *Суточный отчет за {last_full_day['day_num']:02d}.{now.month:02d}.{now.year} (Полные закрытые сутки):*\n\n"
-        f"🔹 *Секция 1 (Измельчение):*\n"
-        f"  • Конв. 4 (Питание): `{last_full_day['kv4']:.1f}` т\n"
-        f"  • Конв. 4Д (Дублир): `{last_full_day['kv4d']:.1f}` т\n"
-        f"  • Погрешность весов: `{diff:+.1f}` т\n"
-        f"  • ... 14 (Дозирование): `{last_full_day['kv14']:.1f}` т\n\n"
-        f"🔸 *Секция 2 (Измельчение):*\n"
-        f"  • Конв. 3 (Питание): `{last_full_day['kv3']:.1f}` т\n"
-        f"  • Конв. 3Д (Дублир): `{last_full_day['kv3d']:.1f}` т\n"
-        f"  • Погрешность весов: `{diff2:+.1f}` т\n"
-        f"  • ... 15 (Дозирование): `{last_full_day['kv15']:.1f}` т"
-    )
-    await msg.answer(text, parse_mode="Markdown")
+    for r in complete_rows:
+        diff = r["kv4"] - r["kv4d"]
+        pct = (diff / r["kv4"] * 100) if r["kv4"] > 0 else 0.0
+        
+        # Если расхождение больше 1.5% — помечаем значком предупреждения
+        warn_flag = "⚠️" if abs(pct) > 1.5 and r["kv4"] > 0 else " "
+        
+        text += f"`{r['day_num']:02d}   | {r['kv4']:<7.1f} | {r['kv4d']:<7.1f} | {pct:<+5.1f}%` {warn_flag}\n"
+        
+    await msg.answer(text[:4000], parse_mode="Markdown")
 
 # ── КНОПКА: ОТЧЕТ ЗА 1 СМЕНУ ТЕКУЩЕГО НЕПОЛНОГО ДНЯ ──
 @dp.message(F.text == "⚡ Отчёт за 1 смену")
