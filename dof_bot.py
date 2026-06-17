@@ -196,7 +196,7 @@ def _read_xlsx_rows(file_bytes: bytes) -> tuple:
     
     used_sheet = ""
     ws = None
-    for sh in ["ДетТекМесяц", "ТекМесяц", "ДетСменТекМесяц"]:
+    for sh in ["ДетТекМесяZ", "ТекМесяц", "ДетСменТекМесяц"]:
         if sh in sheet_names:
             ws = wb[sh]
             used_sheet = sh
@@ -363,7 +363,7 @@ async def ask_ai(prompt: str, context: str) -> str:
             "Ты — ведущий инженер-технолог и эксперт АСУТП обогатительной фабрики ДОФ.\n"
             "Твоя задача — анализировать логи конвейерных весов, выявлять нарушения норм дозирования (норма 60-80%),\n"
             "проблемы циркуляции (норма 6-20%) и расхождения датчиков (более 1.5%).\n"
-            "Давай краткие, профессиональные технические рекомендации обогатителям. Отвечай строго на русском."
+            "Давай краткие, профессиональные technical рекомендации обогатителям. Отвечай строго на русском."
         ),
         "messages": [
             {"role": "user", "content": f"Контекст (Данные весов фабрики):\n{context}\n\nВопрос пользователя: {prompt}"}
@@ -383,7 +383,7 @@ async def ask_ai(prompt: str, context: str) -> str:
         return f"Не удалось связаться с ИИ-моделью: {e}"
 
 def make_ai_context(rows: list) -> str:
-    lines = ["Дни с технологическими нарушениями на ДОФ:"]
+    lines = ["Дни с technological нарушениями на ДОФ:"]
     for r in rows:
         analysis = analyze_day(r)
         if not analysis["ok"]:
@@ -417,7 +417,7 @@ def main_keyboard():
 async def cmd_start(msg: Message):
     init_db()
     await msg.answer(
-        "🏭 *Добро пожаловать в систему весового контроля ДОФ!*\\n\\n"
+        "🏭 *Добро пожаловать в систему весового контроля ДОФ!*\n\n"
         "Отправьте мне файл отчёта весов (`report.xls` или `.xlsx`), и я автоматически сохраню "
         "все данные, рассчитаю балансы, циркуляцию и выведу нарушения.",
         parse_mode="Markdown",
@@ -447,10 +447,10 @@ async def handle_report(msg: Message):
         saved_days = db_save_daily(parsed, msg.from_user.id, doc.file_name, now.year, now.month)
         
         await wait_msg.edit_text(
-            f"✅ *Файл успешно обработан на сервере!*\\n\\n"
-            f"📊 Лист отчёта: `{parsed['used_sheet']}` ({parsed['month_label']})\\n"
-            f"📅 Период данных: *{parsed['period']}*\\n"
-            f"💾 Записано/обновлено завершённых суток в БД: `{saved_days}`\\n"
+            f"✅ *Файл успешно обработан на сервере!*\n\n"
+            f"📊 Лист отчёта: `{parsed['used_sheet']}` ({parsed['month_label']})\n"
+            f"📅 Период данных: *{parsed['period']}*\n"
+            f"💾 Записано/обновлено завершённых суток в БД: `{saved_days}`\n"
             f"_(Текущие незавершенные сутки автоматически пропущены до завтрашнего дня)_",
             parse_mode="Markdown"
         )
@@ -465,13 +465,13 @@ async def report_daily(msg: Message):
     if not rows:
         return await msg.answer("❌ В базе данных нет данных за текущий месяц. Загрузите файл весов.")
         
-    text = f"📊 *Суточный баланс за {now.month}/{now.year} (тонны):*\\n\\n"
-    text += "`День | Конв.4  | Конв.4Д | Разница`\\n"
-    text += "─────────────────────────────\\n"
+    text = f"📊 *Суточный баланс за {now.month}/{now.year} (тонны):*\n\n"
+    text += "`День | Конв.4  | Конв.4Д | Разница`\n"
+    text += "─────────────────────────────\n"
     
     for r in rows:
         diff = r["kv4"] - r["kv4d"]
-        text += f"`{r['day_num']:02d}   | {r['kv4']:<7.1f} | {r['kv4d']:<7.1f} | {diff:<+6.1f}`\\n"
+        text += f"`{r['day_num']:02d}   | {r['kv4']:<7.1f} | {r['kv4d']:<7.1f} | {diff:<+6.1f}`\n"
         
     await msg.answer(text[:4000], parse_mode="Markdown")
 
@@ -483,9 +483,9 @@ async def report_weekly(msg: Message):
         return await msg.answer("❌ Данные отсутствуют.")
         
     last_7 = rows[-7:]
-    text = "📆 *Сводка за последние 7 завершённых дней работы фабрики (т):*\\n\\n"
+    text = "📆 *Сводка за последние 7 завершённых дней работы фабрики (т):*\n\n"
     for r in last_7:
-        text += f"▪️ *День {r['day_num']}:* Питание Секц1: `{r['kv4']:.1f}` т, Секц2: `{r['kv3']:.1f}` т\\n"
+        text += f"▪️ *День {r['day_num']}:* Питание Секц1: `{r['kv4']:.1f}` т, Секц2: `{r['kv3']:.1f}` т\n"
     await msg.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text == "🗓 Месячный итог")
@@ -501,12 +501,12 @@ async def report_monthly(msg: Message):
     t_kv15 = sum(r["kv15"] for r in rows)
     
     text = (
-        f"🗓 *Накопленный итог за месяц ({now.month}/{now.year}):*\\n\\n"
-        f"🔹 *Секция 1 (Измельчение):*\\n"
-        f"  • Всего переработано (Кв4): `{t_kv4:,.1f}` тонн\\n"
-        f"  • Дозирование (Кв14): `{t_kv14:,.1f}` тонн\\n\\n"
-        f"🔸 *Секция 2 (Измельчение):*\\n"
-        f"  • Всего переработано (Кв3): `{t_kv3:,.1f}` тонн\\n"
+        f"🗓 *Накопленный итог за месяц ({now.month}/{now.year}):*\n\n"
+        f"🔹 *Секция 1 (Измельчение):*\n"
+        f"  • Всего переработано (Кв4): `{t_kv4:,.1f}` тонн\n"
+        f"  • Дозирование (Кв14): `{t_kv14:,.1f}` тонн\n\n"
+        f"🔸 *Секция 2 (Измельчение):*\n"
+        f"  • Всего переработано (Кв3): `{t_kv3:,.1f}` тонн\n"
         f"  • Дозирование (Кв15): `{t_kv15:,.1f}` тонн"
     )
     await msg.answer(text, parse_mode="Markdown")
@@ -518,17 +518,17 @@ async def report_alerts(msg: Message):
     if not rows:
         return await msg.answer("❌ Нет данных.")
         
-    text = "🔔 *Технологические сводки и нарушения норм ДОФ за месяц:*\\n\\n"
+    text = "🔔 *Технологические сводки и нарушения норм ДОФ за месяц:*\n\n"
     found = False
     
     for r in rows:
         analysis = analyze_day(r)
         if analysis["alerts"]:
             found = True
-            text += f"📅 *День {r['day_num']}:*\\n"
+            text += f"📅 *День {r['day_num']}:*\n"
             for alert in analysis["alerts"]:
-                text += f"  {alert}\\n"
-            text += "\\n"
+                text += f"  {alert}\n"
+            text += "\n"
             
     if not found:
         text += "✅ Все показатели дозирования, циркуляции и весов в пределах технологических норм!"
@@ -542,48 +542,48 @@ async def report_duplication(msg: Message):
     if not rows:
         return await msg.answer("❌ Нет данных.")
         
-    text = "🔍 *Анализ дублирующих весов (Допустимо < 1.5%):*\\n\\n"
+    text = "🔍 *Анализ дублирующих весов (Допустимо < 1.5%):*\n\n"
     for r in rows:
         an = analyze_day(r)
         if r["kv4"] > 0 or r["kv3"] > 0:
-            text += f"▪️ *День {r['day_num']}:* Разница Секц1: `{an['b1_diff']:.1f}` т | Секц2: `{an['b2_diff']:.1f}` т\\n"
+            text += f"▪️ *День {r['day_num']}:* Разница Секц1: `{an['b1_diff']:.1f}` т | Секц2: `{an['b2_diff']:.1f}` т\n"
     await msg.answer(text[:4000], parse_mode="Markdown")
 
 @dp.message(F.text == "🤖 Задать вопрос AI")
 async def ai_request(msg: Message, state: FSMContext):
     await state.set_state(AIState.waiting_for_question)
     await msg.answer(
-        "🤖 *Режим AI-Ассистента АСУТП/Технолога*\\n\\n"
-        "Я проанализирую все нарушения и суточные балансы фабрики за текущий месяц.\\n"
-        "Введите ваш вопрос. Например:\\n"
-        "_— Сделай краткую диагностику работы секций и выдели критические дни_"\\n"
-        "_— Какая секция дозирования питания работала стабильнее в этом месяце?_",
-        parse_mode="Markdown"
+        "🤖 *Режим AI-Ассистента АСУТП/Технолога*\n\n"
+        "Я проанализирую все нарушения и суточные балансы фабрики за текущий месяц.\n"
+        "Введите ваш вопрос. Например:\n"
+        "— Сделай краткую диагностику работы секций и выдели критические дни\n"
+        "— Какая секция дозирования питания работала стабильнее в этом месяце?",
+        reply_markup=main_keyboard()
     )
 
 @dp.message(AIState.waiting_for_question)
 async def ai_processing(msg: Message, state: FSMContext):
     await state.clear()
-    wait = await msg.answer("🧠 _ИИ-Агент изучает логи базы данных daily_data и строит отчет..._", parse_mode="Markdown")
+    wait = await msg.answer("🧠 _ИИ-Агент изучает логи базы данных daily_data и строит отчет..._")
     
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
     ctx = make_ai_context(rows) if rows else "Нет данных за этот месяц."
     
     answer = await ask_ai(msg.text, ctx)
-    await wait.edit_text(f"🤖 *AI-Агент:*\\n\\n{answer[:4000]}", parse_mode="Markdown")
+    await wait.edit_text(f"🤖 *AI-Агент:*\n\n{answer[:4000]}")
 
 @dp.message(F.text == "❓ Помощь")
 async def h_help(msg: Message):
     await msg.answer(
-        "📖 *Как пользоваться ботом:*\\n\\n"
-        "1️⃣ Скиньте файл `report.xls` или `.xlsx` в чат.\\n"
-        "2️⃣ Бот прочитает его в ОЗУ и обновит сохранённые дни.\\n"
-        "3️⃣ Нажимайте встроенные кнопки меню для выгрузки аналитики.\\n\\n"
-        "*Установленные нормы ДОФ:*\\n"
-        "• Конв.14/15 (дозирование): `60–80%` от Конв.4/3\\n"
-        "• Конв.101/102 (циркулирующая нагрузка): `6–20%`\\n"
-        "• Погрешность дублирования датчиков: `<= 1.5%`\\n"
+        "📖 *Как пользоваться ботом:*\n\n"
+        "1️⃣ Скиньте файл `report.xls` или `.xlsx` в чат.\n"
+        "2️⃣ Бот прочитает его в ОЗУ и обновит сохранённые дни.\n"
+        "3️⃣ Нажимайте встроенные кнопки меню для выгрузки аналитики.\n\n"
+        "*Установленные нормы ДОФ:*\n"
+        "• Конв.14/15 (дозирование): `60–80%` от Конв.4/3\n"
+        "• Конв.101/102 (циркулирующая нагрузка): `6–20%`\n"
+        "• Погрешность дублирования датчиков: `<= 1.5%`\n"
         "• _Текущие незавершенные сутки отсекаются автоматически, чтобы не искажать итоги._",
         parse_mode="Markdown"
     )
