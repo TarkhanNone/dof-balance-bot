@@ -227,7 +227,8 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
             period_str = str(row[1]).strip() if len(row) > 1 else ""
             continue
         key = CONV_MAP.get(name) or CONV_MAP.get(name.rstrip())
-        if key && len(row) > 1:
+        # ФИКС ОПЕЧАТКИ: Заменили && на and
+        if key and len(row) > 1:
             v = _safe(row[1])
             if v > 0: totals[key] = v
 
@@ -362,12 +363,11 @@ async def handle_report(msg: Message):
         logging.error(f"Сбой: {e}")
         await wait_msg.edit_text(f"❌ Сбой обработки: {e}")
 
-# ── КНОПКА: СУТОЧНЫЙ БАЛАНС (ВОЗВРАЩЕНА ТАБЛИЦА С % ИЗ DOF_BOT_OLD) ──
+# ── КНОПКА: СУТОЧНЫЙ БАЛАНС (СТРОГО С % ОТКЛОНЕНИЙ) ──
 @dp.message(F.text == "📅 Суточный баланс")
 async def report_daily(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
-    # Фильтруем только полные закрытые сутки
     complete_rows = [r for r in rows if r["is_complete"] == 1]
     
     if not complete_rows:
@@ -381,7 +381,6 @@ async def report_daily(msg: Message):
         diff = r["kv4"] - r["kv4d"]
         pct = (diff / r["kv4"] * 100) if r["kv4"] > 0 else 0.0
         
-        # Если расхождение больше 1.5% — помечаем значком предупреждения
         warn_flag = "⚠️" if abs(pct) > 1.5 and r["kv4"] > 0 else " "
         
         text += f"`{r['day_num']:02d}   | {r['kv4']:<7.1f} | {r['kv4d']:<7.1f} | {pct:<+5.1f}%` {warn_flag}\n"
