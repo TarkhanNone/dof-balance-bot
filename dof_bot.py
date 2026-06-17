@@ -33,21 +33,37 @@ BOT_TOKEN         = os.getenv("BOT_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 DB_PATH           = "dof_balance.db"
 
-# Маппинг имен конвейеров из XLS в БД ключи
+# Восстановленные оригинальные константы норм ДОФ из dof_bot_old
+NORMS = {
+    "kv14":  (60, 80,  "Конв.14",      1),
+    "kv15":  (60, 80,  "Конв.15",      2),
+    "kv32":  (40, 60,  "Конв.32",      1),
+    "kv31":  (40, 60,  "Конв.31",      2),
+    "kv34":  (83, 87,  "Конв.34→ММС",  1),
+    "kv33":  (83, 87,  "Конв.33→ММС",  2),
+    "kv102": (6,  20,  "Конв.102 хв.", 1),
+    "kv101": (6,  20,  "Конв.101 хв.", 2),
+    "kv19":  (40, 60,  "Конв.19",      2),
+    "kv34a": (15, 45,  "Конв.10/34А",  1),
+}
+WARN_PCT = 2.0
+CRIT_PCT = 5.0
+
+# Маппинг индивидуальных конвейеров из XLS в БД ключи
 CONV_MAP = {
-    "Конвейер 4": "kv4",      "Конвейер 4Д": "kv4d",
-    "Конвейер 14": "kv14",    "Конвейер 32": "kv32",
-    "Конвейер 34": "kv34",    "Конвейер 34А": "kv34a",
-    "Конвейер 102": "kv102",  "Конвейер 24ПП": "kv24p",
-    "Конвейер 24ХВ": "kv24hv","Конвейер 28А.1": "kv28a1",
-    
-    "Конвейер 3": "kv3",      "Конвейer 3Д": "kv3d", "Конвейер 3Д": "kv3d",
-    "Конвейер 15": "kv15",    "Конвейер 19": "kv19",
-    "Конвейер 31": "kv31",    "Конвейер 33": "kv33",
-    "Конвейер 101": "kv101",  "Конвейер 28А.2": "kv28a2",
-    
-    "Конвейер 44": "kv44",    "Конвейер 46": "kv46",
-    "Конвейер 74Д": "kv74",   "Конвейер 74": "kv74"
+    "Конвейер 4":    "kv4",   "Конвейер 4Д":   "kv4d",
+    "Конвейер 14":   "kv14",  "Конвейер 32":   "kv32",
+    "Конвейер 18":   "kv18",  "Конвейер 102":  "kv102",
+    "Конвейер 34 ":  "kv34",  "Конвейер 34":   "kv34",
+    "Конвейер 24ПП": "kv24p", "Конвейер 24ХВ": "kv24hv",
+    "Конвейер 28А.1":"kv28a1","Конвейер 34A":  "kv34a",
+    "Конвейер 3":    "kv3",   "Конвейер 3Д":   "kv3d",
+    "Конвейер 15":   "kv15",  "Конвейер 31":   "kv31",
+    "Конвейер 19":   "kv19",  "Конвейер 101":  "kv101",
+    "Конвейер 33":   "kv33",  "Конвейер 28А.2":"kv28a2",
+    "Конвейер 44":   "kv44",  "Конвейер 44Д":  "kv44d",
+    "Конвейер 46":   "kv46",  "Конвейер 46Д":  "kv46d",
+    "Конвейер 74":   "kv74",  "Конвейер 74Д":  "kv74d",
 }
 
 # ════════════════════════════════════════════════════════
@@ -104,7 +120,6 @@ def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: i
             if not vals: 
                 continue
             
-            # Последний день в документе — всегда неполные сутки (is_complete = 0)
             is_complete = 0 if day_num == max_day else 1
             
             rec = {
@@ -140,7 +155,7 @@ def db_get_month_data(year: int, month: int) -> list:
 # ════════════════════════════════════════════════════════
 def _safe(v):
     try: return float(v) if v is not None else 0.0
-    except (ValueError, TypeError): return 0.0
+    except: return 0.0
 
 def _read_xls_rows(file_bytes: bytes) -> tuple:
     wb_xls = xlrd.open_workbook(file_contents=file_bytes)
@@ -227,7 +242,6 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
             period_str = str(row[1]).strip() if len(row) > 1 else ""
             continue
         key = CONV_MAP.get(name) or CONV_MAP.get(name.rstrip())
-        # ФИКС ОПЕЧАТКИ: Заменили && на and
         if key and len(row) > 1:
             v = _safe(row[1])
             if v > 0: totals[key] = v
@@ -237,44 +251,83 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
     return result
 
 # ════════════════════════════════════════════════════════
-#  АНАЛИТИКА ТЕХНОЛОГИИ
+#  ОРИГИНАЛЬНЫЕ МАТЕМАТИЧЕСКИЕ ФОРМУЛЫ ИЗ DOF_BOT_OLD
 # ════════════════════════════════════════════════════════
-def analyze_day(r: sqlite3.Row) -> dict:
-    res = {"day": r["day_num"], "alerts": [], "b1_diff": 0.0, "b2_diff": 0.0, "ok": True}
+def bal1(d):
+    b = d.get("kv4", 0)
+    if not b: return None
+    return (d.get("kv102",0) + d.get("kv34",0) + d.get("kv24p",0) + d.get("kv24hv",0) - d.get("kv28a1",0) - b) / b * 100
+
+def bal2(d):
+    b = d.get("kv3", 0)
+    if not b: return None
+    return (d.get("kv101",0) + d.get("kv33",0) - d.get("kv28a2",0) - b) / b * 100
+
+def balc1(d):
+    b = d.get("kv4", 0)
+    if not b: return None
+    return (d.get("kv102",0) + d.get("kv24hv",0) + d.get("kv24p",0) + d.get("kv32",0) - d.get("kv28a1",0) - d.get("kv14",0)) / b * 100
+
+def balc2(d):
+    b = d.get("kv3", 0)
+    if not b: return None
+    return (d.get("kv101",0) + d.get("kv31",0) - d.get("kv28a2",0) - d.get("kv15",0)) / b * 100
+
+def pct(v, base):
+    return v / base * 100 if base else 0
+
+def check_norm(val, base, key):
+    if not base or key not in NORMS: return "none", 0
+    p = pct(val, base)
+    mn, mx = NORMS[key][0], NORMS[key][1]
+    m = (mx - mn) * 0.5
+    if mn <= p <= mx: return "ok", p
+    if mn - m <= p <= mx + m: return "warn", p
+    return "crit", p
+
+def em_bal(v):
+    if v is None: return "⬜"
+    return "✅" if abs(v) <= WARN_PCT else "⚠️" if abs(v) <= CRIT_PCT else "🚨"
+
+def em_norm(st):
+    return {"ok": "✅", "warn": "⚠️", "crit": "🚨", "none": "⬜"}.get(st, "⬜")
+
+def sign(v, d=2):
+    if v is None: return "—"
+    return f"+{v:.{d}f}%" if v >= 0 else f"{v:.{d}f}%"
+
+def fmt(v):
+    if not v and v != 0: return "—"
+    return f"{int(v):,}".replace(",", "_")
+
+def build_alerts(d: dict, label="") -> list:
+    alerts = []
+    base4, base3 = d.get("kv4", 0), d.get("kv3", 0)
+    prefix = f"[{label}] " if label else ""
     
-    if r["kv4"] == 0 and r["kv4d"] == 0:
-        res["alerts"].append("🔧 Секция 1: Остановка конвейеров (ремонт)")
-    else:
-        if r["kv4"] > 0:
-            diff_p = abs(r["kv4"] - r["kv4d"]) / r["kv4"] * 100
-            res["b1_diff"] = r["kv4"] - r["kv4d"]
-            if diff_p > 1.5:
-                res["alerts"].append(f"⚠️ Расхождение секции 1 (Кв4/4Д): {diff_p:.1f}% (Разница: {res['b1_diff']:.1f} т)")
-        if r["kv4"] > 0 and r["kv14"] > 0:
-            p = (r["kv14"] / r["kv4"]) * 100
-            if p < 60 or p > 80: res["alerts"].append(f"🛑 Дозирование Секция 1: {p:.1f}% (Норма 60-80%)")
-        if r["kv4"] > 0 and r["kv102"] > 0:
-            p = (r["kv102"] / r["kv4"]) * 100
-            if p < 6 or p > 20: res["alerts"].append(f"📉 Нагрузка Секция 1: {p:.1f}% (Норма 6-20%)")
+    # Сверка Балансов
+    b1, b2 = bal1(d), bal2(d)
+    if b1 is not None and abs(b1) > WARN_PCT:
+        alerts.append(f"{em_bal(b1)} {prefix}Техн. Баланс Секции 1: `{sign(b1)}` (Питание Кв4 `{fmt(base4)}` т)")
+    if b2 is not None and abs(b2) > WARN_PCT:
+        alerts.append(f"{em_bal(b2)} {prefix}Техн. Баланс Секции 2: `{sign(b2)}` (Питание Кв3 `{fmt(base3)}` т)")
+        
+    bc1, bc2 = balc1(d), balc2(d)
+    if bc1 is not None and abs(bc1) > WARN_PCT:
+        alerts.append(f"{em_bal(bc1)} {prefix}Баланс Цикла Секции 1: `{sign(bc1)}`")
+    if bc2 is not None and abs(bc2) > WARN_PCT:
+        alerts.append(f"{em_bal(bc2)} {prefix}Баланс Цикла Секции 2: `{sign(bc2)}`")
 
-    if r["kv3"] == 0 and r["kv3d"] == 0:
-        res["alerts"].append("🔧 Секция 2: Остановка конвейеров (ремонт)")
-    else:
-        if r["kv3"] > 0:
-            diff_p = abs(r["kv3"] - r["kv3d"]) / r["kv3"] * 100
-            res["b2_diff"] = r["kv3"] - r["kv3d"]
-            if diff_p > 1.5:
-                res["alerts"].append(f"⚠️ Расхождение секции 2 (Кв3/3Д): {diff_p:.1f}% (Разница: {res['b2_diff']:.1f} т)")
-        if r["kv3"] > 0 and r["kv15"] > 0:
-            p = (r["kv15"] / r["kv3"]) * 100
-            if p < 60 or p > 80: res["alerts"].append(f"🛑 Дозирование Секция 2: {p:.1f}% (Норма 60-80%)")
-        if r["kv3"] > 0 and r["kv101"] > 0:
-            p = (r["kv101"] / r["kv3"]) * 100
-            if p < 6 or p > 20: res["alerts"].append(f"📉 Нагрузка Секция 2: {p:.1f}% (Норма 6-20%)")
-
-    if any(sym in "".join(res["alerts"]) for sym in ["⚠️", "🛑", "📉"]):
-        res["ok"] = False
-    return res
+    # Сверка Технологических норм конвейеров питания дозирования
+    for k, base in [("kv14", base4), ("kv32", base4), ("kv34", base4), ("kv34a", base4),
+                    ("kv102", base4), ("kv15", base3), ("kv31", base3), ("kv33", base3),
+                    ("kv101", base3), ("kv19", base3)]:
+        val = d.get(k, 0)
+        if val > 0 and base > 0:
+            st, p = check_norm(val, base, k)
+            if st in ("warn", "crit"):
+                alerts.append(f"{em_norm(st)} {prefix}{NORMS[k][2]}: `{p:.1f}%` (Норма {NORMS[k][0]}-{NORMS[k][1]}%)")
+    return alerts
 
 # ════════════════════════════════════════════════════════
 #  AI АССИСТЕНТ
@@ -298,12 +351,11 @@ async def ask_ai(prompt: str, context: str) -> str:
     except Exception as e: return f"Сбой связи с AI: {e}"
 
 def make_ai_context(rows: list) -> str:
-    lines = ["Логи нарушений ДОФ за полные сутки:"]
+    lines = ["Логи нарушений технологического процесса ДОФ за полные сутки:"]
     for r in rows:
         if r["is_complete"] == 1:
-            an = analyze_day(r)
-            if not an["ok"]:
-                lines.append(f"- День {r['day_num']}: " + ", ".join(an["alerts"]))
+            al = build_alerts(dict(r), label=f"День {r['day_num']}")
+            if al: lines.extend(al)
     return "\n".join(lines)
 
 # ════════════════════════════════════════════════════════
@@ -363,7 +415,7 @@ async def handle_report(msg: Message):
         logging.error(f"Сбой: {e}")
         await wait_msg.edit_text(f"❌ Сбой обработки: {e}")
 
-# ── КНОПКА: СУТОЧНЫЙ БАЛАНС (СТРОГО С % ОТКЛОНЕНИЙ) ──
+# ── КНОПКА: СУТОЧНЫЙ БАЛАНС (ПОЛНОСТЬЮ ВОССТАНОВЛЕН ИЗ DOF_BOT_OLD) ──
 @dp.message(F.text == "📅 Суточный баланс")
 async def report_daily(msg: Message):
     now = datetime.now()
@@ -373,17 +425,26 @@ async def report_daily(msg: Message):
     if not complete_rows:
         return await msg.answer("❌ В базе нет завершённых суток.")
         
-    text = f"📊 *Суточный баланс за {now.month:02d}/{now.year} (тонны):*\n\n"
-    text += "`День | Конв.4  | Конв.4Д | Отклон. %`\n"
-    text += "─────────────────────────────\n"
+    # СТРОГАЯ ОРИГИНАЛЬНАЯ ТАБЛИЦА С ВЫЧИСЛЕНИЕМ ТЕХНОЛОГИЧЕСКИХ ОТКЛОНЕНИЙ % ИЗ DOF_BOT_OLD
+    text = f"📊 *Суточный технологический отчет ({now.month:02d}/{now.year}):*\n"
+    text += "_(Учтены только полные закрытые сутки)_\n\n"
+    text += "`Дн | Секц1 (Кв4/4Д) | Секц2 (Кв3/3Д) `\n"
+    text += "────────────────────────────────\n"
     
     for r in complete_rows:
-        diff = r["kv4"] - r["kv4d"]
-        pct = (diff / r["kv4"] * 100) if r["kv4"] > 0 else 0.0
+        d = dict(r)
         
-        warn_flag = "⚠️" if abs(pct) > 1.5 and r["kv4"] > 0 else " "
+        # Расчет погрешности Секции 1
+        diff1 = d.get("kv4", 0) - d.get("kv4d", 0)
+        pct1 = (diff1 / d.get("kv4", 1) * 100) if d.get("kv4", 0) > 0 else 0.0
+        em1 = "✅" if abs(pct1) <= 1.5 else "⚠️" if d.get("kv4", 0) > 0 else "⬜"
         
-        text += f"`{r['day_num']:02d}   | {r['kv4']:<7.1f} | {r['kv4d']:<7.1f} | {pct:<+5.1f}%` {warn_flag}\n"
+        # Расчет погрешности Секции 2
+        diff2 = d.get("kv3", 0) - d.get("kv3d", 0)
+        pct2 = (diff2 / d.get("kv3", 1) * 100) if d.get("kv3", 0) > 0 else 0.0
+        em2 = "✅" if abs(pct2) <= 1.5 else "⚠️" if d.get("kv3", 0) > 0 else "⬜"
+        
+        text += f"`{d['day_num']:02d} | {em1} {pct1:<+5.1f}% ({diff1:<+4.0f}т) | {em2} {pct2:<+5.1f}% ({diff2:<+4.0f}т)`\n"
         
     await msg.answer(text[:4000], parse_mode="Markdown")
 
@@ -397,20 +458,29 @@ async def report_incomplete_shift(msg: Message):
     if not incomplete_rows:
         return await msg.answer("📋 Все суточные данные закрыты. Неполных промежуточных смен не найдено.")
         
-    inc = incomplete_rows[0]
+    inc = dict(incomplete_rows[0])
+    
+    # Считаем промежуточные балансы 1-й смены по оригинальным формулам
+    b1, b2 = bal1(inc), bal2(inc)
+    bc1, bc2 = balc1(inc), balc2(inc)
+    
     text = (
         f"⚡ *Промежуточный отчёт по 1-й смене за {inc['day_num']:02d}.{now.month:02d}:*\n"
         f"_(Данные за 12 часов выгрузки, исключены из месячных итогов)_\n\n"
-        f"🏭 *Секция 1:* Кв4: `{inc['kv4']:.1f}` т | Кв4Д: `{inc['kv4d']:.1f}` т\n"
-        f"💊 Дозирование Кв14: `{inc['kv14']:.1f}` т\n"
-        f"🔄 Циркуляция Кв102: `{inc['kv102']:.1f}` т\n\n"
-        f"🏭 *Секция 2:* Кв3: `{inc['kv3']:.1f}` т | Кв3Д: `{inc['kv3d']:.1f}` т\n"
-        f"💊 Дозирование Кв15: `{inc['kv15']:.1f}` т\n"
-        f"🔄 Циркуляция Кв101: `{inc['kv101']:.1f}` т"
+        f"🏭 *Секция 1 (Питание Кв4: `{fmt(inc['kv4'])}` т):*\n"
+        f"  • Расхождение Кв4/4Д: `{sign(b1)}` {em_bal(b1)}\n"
+        f"  • Баланс цикла: `{sign(bc1)}` {em_bal(bc1)}\n"
+        f"  • Дозирование Кв14: `{inc['kv14']:.1f}` т\n"
+        f"  • Циркуляция Кв102: `{inc['kv102']:.1f}` т\n\n"
+        f"🏭 *Секция 2 (Питание Кв3: `{fmt(inc['kv3'])}` т):*\n"
+        f"  • Расхождение Кв3/3Д: `{sign(b2)}` {em_bal(b2)}\n"
+        f"  • Баланс цикла: `{sign(bc2)}` {em_bal(bc2)}\n"
+        f"  • Дозирование Кв15: `{inc['kv15']:.1f}` т\n"
+        f"  • Циркуляция Кв101: `{inc['kv101']:.1f}` т"
     )
     await msg.answer(text, parse_mode="Markdown")
 
-# ── КНОПКА: МЕСЯЧНЫЙ ИТОГ (СТРОГО ЗА ПОЛНЫЕ СУТКИ) ──
+# ── КНОПКА: МЕСЯЧНЫЙ ИТОГ (ОРИГИНАЛЬНЫЕ ИТОГОВЫЕ ФОРМУЛЫ ИЗ DOF_BOT_OLD) ──
 @dp.message(F.text == "🗓 Месячный итог")
 async def report_monthly(msg: Message):
     now = datetime.now()
@@ -420,50 +490,57 @@ async def report_monthly(msg: Message):
     if not full_days:
         return await msg.answer("❌ Нет полных данных для расчета месячного итога.")
         
-    t_kv4 = sum(r["kv4"] for r in full_days)
-    t_kv3 = sum(r["kv3"] for r in full_days)
-    t_kv14 = sum(r["kv14"] for r in full_days)
-    t_kv15 = sum(r["kv15"] for r in full_days)
+    s = {k: sum(r[k] for r in full_days) for k in ["kv4","kv4d","kv14","kv32","kv34","kv34a","kv102","kv24p",
+                                                   "kv24hv","kv28a1","kv3","kv3d","kv15","kv19","kv31","kv33",
+                                                   "kv101","kv28a2","kv44","kv46","kv74"]}
+    
+    mb1, mb2 = bal1(s), bal2(s)
+    mbc1, mbc2 = balc1(s), balc2(s)
     
     text = (
-        f"🗓 *Накопленный итог за месяц (Всего полных суток: {len(full_days)}):*\n"
-        f"_(Текущий незавершённый день полностью исключён из подсчёта)_\n\n"
-        f"🔹 *Секция 1 (Измельчение):*\n"
-        f"  • Всего питания (Кв4): `{t_kv4:,.1f}` т\n"
-        f"  • Всего дозирования (Кв14): `{t_kv14:,.1f}` т\n\n"
-        f"🔸 *Секция 2 (Измельчение):*\n"
-        f"  • Всего питания (Кв3): `{t_kv3:,.1f}` т\n"
-        f"  • Всего дозирования (Кв15): `{t_kv15:,.1f}` т"
+        f"🗓 *Накопленный баланс за месяц (Учтено суток: {len(full_days)}):*\n"
+        f"_(Промежуточный день выгрузки полностью исключён из подсчёта)_\n\n"
+        f"🔹 *Секция 1 (Питание Кв4: `{fmt(s['kv4'])}` т):*\n"
+        f"  • Расхождение весов Кв4/4Д: `{sign(mb1)}` {em_bal(mb1)}\n"
+        f"  • Баланс технологического цикла: `{sign(mbc1)}` {em_bal(mbc1)}\n"
+        f"  • Итого дозирование Кв14: `{fmt(s['kv14'])}` т\n\n"
+        f"🔸 *Секция 2 (Питание Кв3: `{fmt(s['kv3'])}` т):*\n"
+        f"  • Расхождение весов Кв3/3Д: `{sign(mb2)}` {em_bal(mb2)}\n"
+        f"  • Баланс технологического цикла: `{sign(mbc2)}` {em_bal(mbc2)}\n"
+        f"  • Итого дозирование Кв15: `{fmt(s['kv15'])}` т"
     )
     await msg.answer(text, parse_mode="Markdown")
 
-@dp.message(F.text == "📆 Недельная сводка")
+@dp.message(F.text == "%📆 Недельная сводка" or F.text == "📆 Недельная сводка")
 async def report_weekly(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
     full_days = [r for r in rows if r["is_complete"] == 1]
     if not full_days: return await msg.answer("❌ Данные отсутствуют.")
     
-    text = "📆 *Сводка по полным суткам (последние 7 дней):*\n\n"
+    text = "📆 *Сводка питания по закрытым суткам (последние 7 дней):*\n\n"
     for r in full_days[-7:]:
-        text += f"▪️ *День {r['day_num']}:* Секц1: `{r['kv4']:.1f}` т | Секц2: `{r['kv3']:.1f}` т\n"
+        text += f"▪️ *День {r['day_num']}:* Секция 1: `{fmt(r['kv4'])}` т | Секция 2: `{fmt(r['kv3'])}` т\n"
     await msg.answer(text, parse_mode="Markdown")
 
+# ── КНОПКА: АЛЕРТЫ ФАБРИКИ (ОРИГИНАЛЬНАЯ ПРОВЕРКА ИЗ DOF_BOT_OLD) ──
 @dp.message(F.text == "🔔 Алерты фабрики")
 async def report_alerts(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
     full_days = [r for r in rows if r["is_complete"] == 1]
-    if not full_days: return await msg.answer("❌ Нет полных данных.")
+    if not full_days: return await msg.answer("❌ Нет закрытых суток в базе.")
         
-    text = "🔔 *Технологические нарушения (только по закрытым суткам):*\n\n"
+    text = "🔔 *Технологические нарушения норм ДОФ за текущий месяц:*\n\n"
     found = False
     for r in full_days:
-        analysis = analyze_day(r)
-        if analysis["alerts"] and not analysis["ok"]:
+        al = build_alerts(dict(r), label=f"День {r['day_num']}")
+        if al:
             found = True
-            text += f"📅 *День {r['day_num']}:*\n" + "\n".join(f"  {a}" for a in analysis["alerts"]) + "\n\n"
-    if not found: text += "✅ По всем полным суткам нарушений норм не обнаружено!"
+            text += "\n".join(al) + "\n\n"
+            
+    if not found: 
+        text += "✅ Нарушений технологических балансов и норм дозирования не обнаружено!"
     await msg.answer(text[:4000], parse_mode="Markdown")
 
 @dp.message(F.text == "🤖 Задать вопрос AI")
@@ -474,7 +551,7 @@ async def ai_request(msg: Message, state: FSMContext):
 @dp.message(AIState.waiting_for_question)
 async def ai_processing(msg: Message, state: FSMContext):
     await state.clear()
-    wait = await msg.answer("🧠 _ИИ строит отчет..._")
+    wait = await msg.answer("🧠 _ИИ строит технологический анализ..._")
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
     ctx = make_ai_context(rows) if rows else "Нет полных данных."
