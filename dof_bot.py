@@ -33,10 +33,7 @@ BOT_TOKEN         = os.getenv("BOT_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 DB_PATH           = "dof_balance.db"
 
-USERS = {
-    123456789: "chief",     # ← замени на свой реальный Telegram ID
-}
-
+# Маппинг имен конвейеров из XLS в БД ключи
 CONV_MAP = {
     "Конвейер 4": "kv4",      "Конвейер 4Д": "kv4d",
     "Конвейер 14": "kv14",    "Конвейер 32": "kv32",
@@ -72,7 +69,7 @@ def init_db():
                 kv101 REAL DEFAULT 0, kv28a2 REAL DEFAULT 0, kv44 REAL DEFAULT 0, kv46 REAL DEFAULT 0,
                 kv74 REAL DEFAULT 0,
                 source   TEXT,
-                is_complete INTEGER DEFAULT 1,  -- 1 = полные сутки, 0 = только 1 смена
+                is_complete INTEGER DEFAULT 1,  -- 1 = полные сутки, 0 = только 1 смена (неполный день)
                 uploaded TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(year, month, day_num)
             )
@@ -85,7 +82,7 @@ def init_db():
         conn.commit()
 
 def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: int):
-    """Сохраняет данные. Последний день файла пишется как неполный (только 1 смена)."""
+    """Сохраняет суточные данные. Последний день файла гарантированно помечается как неполный."""
     saved = 0
     FIELDS = [
         "kv4","kv4d","kv14","kv32","kv34","kv34a","kv102","kv24p",
@@ -99,7 +96,6 @@ def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: i
     upd  = ",".join(f"{f}=excluded.{f}" for f in FIELDS) + ", is_complete=excluded.is_complete"
     sql_query = f"INSERT INTO daily_data ({cols}) VALUES ({qs}) ON CONFLICT(year,month,day_num) DO UPDATE SET {upd}"
 
-    # Находим самый последний день в отправленном документе
     all_days = list(parsed["daily"].keys())
     max_day = max(all_days) if all_days else 0
 
@@ -108,7 +104,7 @@ def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: i
             if not vals: 
                 continue
             
-            # Если день последний в файле — помечаем, что он неполный (is_complete = 0)
+            # Последний день в документе — всегда неполные сутки (is_complete = 0)
             is_complete = 0 if day_num == max_day else 1
             
             rec = {
@@ -321,9 +317,9 @@ class AIState(StatesGroup): waiting_for_question = State()
 def main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📅 Суточный баланс"), KeyboardButton(text="📆 Недельная сводка")],
+            [KeyboardButton(text="📅 Суточный баланс"), KeyboardButton(text="⚡ Отчёт за 1 смену")],
             [KeyboardButton(text="🗓 Месячный итог"), KeyboardButton(text="🔔 Алерты фабрики")],
-            [KeyboardButton(text="🔍 Дублирование весов"), KeyboardButton(text="🤖 Задать вопрос AI")],
+            [KeyboardButton(text="📆 Недельная сводка"), KeyboardButton(text="🤖 Задать вопрос AI")],
             [KeyboardButton(text="❓ Помощь")]
         ], resize_keyboard=True
     )
@@ -331,7 +327,7 @@ def main_keyboard():
 @dp.message(Command("start"))
 async def cmd_start(msg: Message):
     init_db()
-    await msg.answer("🏭 *Система весового контроля ДОФ готова!* \nЗагрузите файл отчёта весов.", parse_mode="Markdown", reply_markup=main_keyboard())
+    await msg.answer("🏭 *Система весового контроля ДОФ готова!* \nЗагрузите актуальный файл отчёта весов.", parse_mode="Markdown", reply_markup=main_keyboard())
 
 @dp.message(F.document)
 async def handle_report(msg: Message):
@@ -352,12 +348,15 @@ async def handle_report(msg: Message):
         now = datetime.now()
         saved_days, current_incomplete_day = db_save_daily(parsed, msg.from_user.id, doc.file_name, now.year, now.month)
         
+        # Точное число полных дней из файла
+        total_full_days = current_incomplete_day - 1 if current_incomplete_day > 0 else 0
+        
         await wait_msg.edit_text(
             f"✅ *Отчёт успешно загружен!*\n\n"
             f"📊 Анализ по листу: `{parsed['used_sheet']}`\n"
-            f"📆 Полных суток в базе: *{saved_days - 1}*\n"
-            f"⚡ Выявлена текущая неполная смена: *День {current_incomplete_day}*\n\n"
-            f"Данные пересчитаны без учёта незавершённого дня.",
+            f"📆 Записано полных суток в базу: *{total_full_days}* (с 1 по {total_full_days} число)\n"
+            f"⚡ Выделена текущая неполная смена: *День {current_incomplete_day}*\n\n"
+            f"Используйте меню для получения раздельных отчетов.",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -369,46 +368,44 @@ async def handle_report(msg: Message):
 async def report_daily(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
-    # Фильтруем только полные сутки
     complete_rows = [r for r in rows if r["is_complete"] == 1]
     
     if not complete_rows:
         return await msg.answer("❌ В базе нет завершённых суток.")
         
-    # Берём последние закрытые сутки (например, если сегодня 15-е неполное, покажет строго 14-е)
     last_full_day = complete_rows[-1]
     diff = last_full_day["kv4"] - last_full_day["kv4d"]
     diff2 = last_full_day["kv3"] - last_full_day["kv3d"]
     
     text = (
-        f"📅 *Суточный баланс за {last_full_day['day_num']:02d}.{now.month:02d}.{now.year} (Полные сутки):*\n\n"
-        f"🔹 *Секция 1:*\n"
+        f"📅 *Суточный отчет за {last_full_day['day_num']:02d}.{now.month:02d}.{now.year} (Полные закрытые сутки):*\n\n"
+        f"🔹 *Секция 1 (Измельчение):*\n"
         f"  • Конв. 4 (Питание): `{last_full_day['kv4']:.1f}` т\n"
         f"  • Конв. 4Д (Дублир): `{last_full_day['kv4d']:.1f}` т\n"
-        f"  • Разница весов: `{diff:+.1f}` т\n"
-        f"  • Конв. 14 (Дозирование): `{last_full_day['kv14']:.1f}` т\n\n"
-        f"🔸 *Секция 2:*\n"
+        f"  • Погрешность весов: `{diff:+.1f}` т\n"
+        f"  • ... 14 (Дозирование): `{last_full_day['kv14']:.1f}` т\n\n"
+        f"🔸 *Секция 2 (Измельчение):*\n"
         f"  • Конв. 3 (Питание): `{last_full_day['kv3']:.1f}` т\n"
-        f"  • ... 3Д (Дублир): `{last_full_day['kv3d']:.1f}` т\n"
-        f"  • Разница весов: `{diff2:+.1f}` т\n"
-        f"  • Конв. 15 (Дозирование): `{last_full_day['kv15']:.1f}` т"
+        f"  • Конв. 3Д (Дублир): `{last_full_day['kv3d']:.1f}` т\n"
+        f"  • Погрешность весов: `{diff2:+.1f}` т\n"
+        f"  • ... 15 (Дозирование): `{last_full_day['kv15']:.1f}` т"
     )
     await msg.answer(text, parse_mode="Markdown")
 
-# ── КНОПКА: ТЕКУЩАЯ СМЕНА (ОТДЕЛЬНЫЙ ОТЧЕТ ЗА НЕПОЛНЫЙ ДЕНЬ) ──
-@dp.message(F.text == "🔍 Дублирование весов")  # Переименуем вывод под комплексный отчет смен/неполных данных
+# ── КНОПКА: ОТЧЕТ ЗА 1 СМЕНУ ТЕКУЩЕГО НЕПОЛНОГО ДНЯ ──
+@dp.message(F.text == "⚡ Отчёт за 1 смену")
 async def report_incomplete_shift(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
     incomplete_rows = [r for r in rows if r["is_complete"] == 0]
     
     if not incomplete_rows:
-        return await msg.answer("📋 Все суточные данные в базе закрыты. Неполных смен не найдено.")
+        return await msg.answer("📋 Все суточные данные закрыты. Неполных промежуточных смен не найдено.")
         
     inc = incomplete_rows[0]
     text = (
-        f"⚡ *Отчёт по 1-й смене за текущий день ({inc['day_num']:02d}.{now.month:02d}):*\n"
-        f"_(Данные за 12 часов выгрузки, не включены в общие итоги)_\n\n"
+        f"⚡ *Промежуточный отчёт по 1-й смене за {inc['day_num']:02d}.{now.month:02d}:*\n"
+        f"_(Данные за 12 часов выгрузки, исключены из месячных итогов)_\n\n"
         f"🏭 *Секция 1:* Кв4: `{inc['kv4']:.1f}` т | Кв4Д: `{inc['kv4d']:.1f}` т\n"
         f"💊 Дозирование Кв14: `{inc['kv14']:.1f}` т\n"
         f"🔄 Циркуляция Кв102: `{inc['kv102']:.1f}` т\n\n"
@@ -418,16 +415,15 @@ async def report_incomplete_shift(msg: Message):
     )
     await msg.answer(text, parse_mode="Markdown")
 
-# ── КНОПКА: МЕСЯЧНЫЙ ИТОГ (СТРОГО ЗА 14 ПОЛНЫХ СУТОК) ──
+# ── КНОПКА: МЕСЯЧНЫЙ ИТОГ (СТРОГО ЗА ПОЛНЫЕ СУТКИ) ──
 @dp.message(F.text == "🗓 Месячный итог")
 async def report_monthly(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
-    # Считаем только полные сутки (15-е число автоматически отсекается)
     full_days = [r for r in rows if r["is_complete"] == 1]
     
     if not full_days:
-        return await msg.answer("❌ Данные отсутствуют.")
+        return await msg.answer("❌ Нет полных данных для расчета месячного итога.")
         
     t_kv4 = sum(r["kv4"] for r in full_days)
     t_kv3 = sum(r["kv3"] for r in full_days)
@@ -435,10 +431,14 @@ async def report_monthly(msg: Message):
     t_kv15 = sum(r["kv15"] for r in full_days)
     
     text = (
-        f"🗓 *Месячный итог (Учтено полных суток: {len(full_days)}):*\n"
-        f"_(Текущий день выгрузки исключен из расчета)_\n\n"
-        f"🔹 *Секция 1:* Всего питания (Кв4): `{t_kv4:,.1f}` т, Дозирование (Кв14): `{t_kv14:,.1f}` т\n"
-        f"🔸 *Секция 2:* Всего питания (Кв3): `{t_kv3:,.1f}` т, Дозирование (Кв15): `{t_kv15:,.1f}` т"
+        f"🗓 *Накопленный итог за месяц (Всего полных суток: {len(full_days)}):*\n"
+        f"_(Текущий незавершённый день полностью исключён из подсчёта)_\n\n"
+        f"🔹 *Секция 1 (Измельчение):*\n"
+        f"  • Всего питания (Кв4): `{t_kv4:,.1f}` т\n"
+        f"  • Всего дозирования (Кв14): `{t_kv14:,.1f}` т\n\n"
+        f"🔸 *Секция 2 (Измельчение):*\n"
+        f"  • Всего питания (Кв3): `{t_kv3:,.1f}` т\n"
+        f"  • Всего дозирования (Кв15): `{t_kv15:,.1f}` т"
     )
     await msg.answer(text, parse_mode="Markdown")
 
@@ -474,7 +474,7 @@ async def report_alerts(msg: Message):
 @dp.message(F.text == "🤖 Задать вопрос AI")
 async def ai_request(msg: Message, state: FSMContext):
     await state.set_state(AIState.waiting_for_question)
-    await msg.answer("🤖 *Режим AI-Технолога*\nВведите ваш вопрос по работе фабрики:")
+    await msg.answer("🤖 *Режим AI-Технолога ДОФ*\nВведите ваш вопрос по работе фабрики:")
 
 @dp.message(AIState.waiting_for_question)
 async def ai_processing(msg: Message, state: FSMContext):
