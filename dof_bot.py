@@ -93,16 +93,17 @@ STOCK_DIFF_WARN = 500   # тонн — порог алерта по расхож
 
 def calc_produced(d: dict) -> float:
     """Произведено = (44+44Д)/2 + 46Д + (74+74Д)/2"""
-    avg44 = (d.get("kv44", 0) + d.get("kv44d", 0)) / 2
-    k46d  = d.get("kv46d", 0)
-    avg74 = (d.get("kv74", 0) + d.get("kv74d", 0)) / 2
+    # [FIX]: Защита от TypeError (при None значениях) через принудительное извлечение float(x or 0)
+    avg44 = (float(d.get("kv44") or 0) + float(d.get("kv44d") or 0)) / 2
+    k46d  = float(d.get("kv46d") or 0)
+    avg74 = (float(d.get("kv74") or 0) + float(d.get("kv74d") or 0)) / 2
     return avg44 + k46d + avg74
 
 def calc_shipped(d: dict) -> float:
     """Отгружено = 65МПС+65ЦПО+66МПС+66ЦПО+84МПС+84ЦПО"""
-    return (d.get("kv65mps", 0) + d.get("kv65cpo", 0) +
-            d.get("kv66mps", 0) + d.get("kv66cpo", 0) +
-            d.get("kv84mps", 0) + d.get("kv84cpo", 0))
+    # [FIX]: Аналогично страхуем от None
+    keys = ["kv65mps", "kv65cpo", "kv66mps", "kv66cpo", "kv84mps", "kv84cpo"]
+    return sum(float(d.get(k) or 0) for k in keys)
 
 # ════════════════════════════════════════════════════════
 #  БАЗА ДАННЫХ (безопасные context manager'ы)
@@ -123,9 +124,6 @@ def init_db():
                 UNIQUE(year, month, day_num)
             )
         """)
-        # Смена 1 (ночная) последнего, ещё незавершённого дня — отдельно
-        # от daily_data. НИКОГДА не участвует в суточном/недельном/
-        # месячном балансе, только показывается по отдельной кнопке.
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS night_shift (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,22 +143,19 @@ def init_db():
                 user_id    INTEGER, uploaded TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Склад влажного концентрата — суточный расчёт.
-        # Оператор вводит запас за предыдущий и текущий день.
-        # Несовпадение = Вес.изм.сут − Изм.запаса.маркш
         conn.execute("""
             CREATE TABLE IF NOT EXISTS stock_data (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 year            INTEGER,
                 month           INTEGER,
-                day_num         INTEGER,    -- день расчёта (напр. 18)
-                stock_prev      REAL,       -- запас на конец дня N-1 (от оператора, напр. за 17-е)
-                stock_curr      REAL,       -- запас на конец дня N   (от оператора, напр. за 18-е)
-                produced        REAL,       -- произведено за день N (из report.xls)
-                shipped         REAL,       -- отгружено за день N (из report.xls)
-                ves_izm         REAL,       -- весовое изм. = produced − shipped
-                marksh_izm      REAL,       -- маркш. изм. = stock_curr − stock_prev
-                nesovpadenie    REAL,       -- несовпадение = ves_izm − marksh_izm
+                day_num         INTEGER,
+                stock_prev      REAL,
+                stock_curr      REAL,
+                produced        REAL,
+                shipped         REAL,
+                ves_izm         REAL,
+                marksh_izm      REAL,
+                nesovpadenie    REAL,
                 user_id         INTEGER,
                 entered_at      TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(year, month, day_num)
@@ -170,19 +165,6 @@ def init_db():
 
 
 def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: int) -> tuple:
-    """
-    Сохраняет суточные данные (сумма смена1+смена2 на конвейер).
-
-    ПРАВИЛО ПОЛНОТЫ СУТОК (см. структуру смен ДОФ):
-    Сутки попадают в daily_data (и далее в суточный/недельный/месячный
-    баланс) ТОЛЬКО когда в файле присутствуют ОБЕ смены этого дня.
-    Файл скачивается утром, когда Смена 1 последнего дня уже завершена,
-    а Смена 2 ещё идёт — поэтому ПОСЛЕДНИЙ (максимальный) день в файле
-    полностью исключается из daily_data, включая его Смену 1.
-    Смена 1 последнего дня сохраняется отдельно в night_shift —
-    показывается только по отдельной кнопке "🌙 Ночная смена",
-    в общий баланс не подмешивается.
-    """
     base_fields = ["year", "month", "day_num", "report_date", "source"] + FIELDS
     cols = ",".join(base_fields)
     qs   = ",".join(["?"] * len(base_fields))
@@ -209,11 +191,7 @@ def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: i
 
     saved = 0
     with sqlite3.connect(DB_PATH) as conn:
-        # Прошлая "ночная смена" этого месяца устарела — сбрасываем
         conn.execute("DELETE FROM night_shift WHERE year=? AND month=?", (year, month))
-        # На случай, если последний день раньше уже считался полным
-        # (например, файл загрузили повторно в тот же день) — убираем
-        # его из daily_data, раз сейчас он снова неполный.
         conn.execute(
             "DELETE FROM daily_data WHERE year=? AND month=? AND day_num=?",
             (year, month, max_day)
@@ -226,8 +204,6 @@ def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: i
                 continue
 
             if day_num == max_day:
-                # Последний день: НЕ идёт в daily_data вообще.
-                # Смена 1 сохраняется отдельно для кнопки "Ночная смена".
                 if s1 and any(v for v in s1.values()):
                     ns_rec = {"year": year, "month": month, "day_num": day_num, "source": filename}
                     for f in FIELDS:
@@ -238,7 +214,6 @@ def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: i
                         logger.warning(f"Ошибка сохранения ночной смены дня {day_num}: {e}")
                 continue
 
-            # Прошлые (завершённые) дни: обе смены суммируются
             vals = {f: s1.get(f, 0.0) + s2.get(f, 0.0) for f in FIELDS}
             rec = {
                 "year": year, "month": month, "day_num": day_num,
@@ -262,7 +237,6 @@ def db_save_daily(parsed: dict, user_id: int, filename: str, year: int, month: i
 
 
 def db_get_night_shift(year: int, month: int) -> Optional[dict]:
-    """Смена 1 (ночная) последнего незавершённого дня — для кнопки '🌙 Ночная смена'."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -272,30 +246,9 @@ def db_get_night_shift(year: int, month: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-# ════════════════════════════════════════════════════════
-#  СКЛАД ВЛАЖНОГО КОНЦЕНТРАТА — DB ФУНКЦИИ
-#
-#  ФОРМУЛЫ (восстановлены из Учет_по_конвейерам_2025.xlsx):
-#
-#  Произведено_нак   = Σ[(44+44Д)/2 + 46Д + (74+74Д)/2]  с 1 по N день
-#  Отгружено_нак     = Σ[65МПС+65ЦПО+66МПС+66ЦПО+84МПС+84ЦПО] с 1 по N день
-#  СКЛАД ВЛАЖНОГО КОНЦЕНТРАТА — DB ФУНКЦИИ
-#
-#  Суточный расчёт за день N:
-#    Произведено(N)   = (44+44Д)/2 + 46Д + (74+74Д)/2  из report.xls за день N
-#    Отгружено(N)     = 65МПС+ЦПО + 66МПС+ЦПО + 84МПС+ЦПО из report.xls за день N
-#    Вес.изм.(N)      = Произведено − Отгружено
-#    Маркш.изм.(N)    = Запас_N − Запас_(N-1)   (оба числа от оператора)
-#    Несовпадение(N)  = Вес.изм. − Маркш.изм.   (алерт если |Несовп| > 500 т)
-# ════════════════════════════════════════════════════════
 def db_save_stock(year: int, month: int, day_num: int,
                   stock_prev: float, stock_curr: float,
                   user_id: int) -> dict:
-    """
-    Сохраняет суточный расчёт склада за день day_num.
-    stock_prev — запас на конец дня (N-1), stock_curr — на конец дня N.
-    Данные Произведено/Отгружено берутся из daily_data автоматически.
-    """
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -346,7 +299,6 @@ def db_save_stock(year: int, month: int, day_num: int,
 
 
 def db_get_stock_history(year: int, month: int) -> list:
-    """История склада за месяц."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -367,20 +319,13 @@ def db_get_month_data(year: int, month: int) -> list:
 
 
 # ════════════════════════════════════════════════════════
-#  ПАРСЕР EXCEL — без дублирования (DRY), .append(), try/except
+#  ПАРСЕР EXCEL
 # ════════════════════════════════════════════════════════
 def _safe(v) -> float:
     try:
         return float(v) if v is not None else 0.0
     except (ValueError, TypeError):
         return 0.0
-
-
-def _pick_sheet(sheet_names: list, preferred: list, fallback_idx: int = 0) -> str:
-    for sh in preferred:
-        if sh in sheet_names:
-            return sh
-    return sheet_names[fallback_idx]
 
 
 def _read_xls_sheet(file_bytes: bytes, sheet_name: str) -> list:
@@ -411,20 +356,6 @@ def _get_sheet_names(file_bytes: bytes, filename: str) -> list:
 
 
 def parse_report(file_bytes: bytes, filename: str) -> dict:
-    """
-    Парсит лист 'ДетСменТекМесяц' — детализация по сменам (Смена 1 / Смена 2)
-    для каждого дня текущего месяца.
-
-    Структура листа (см. фото отчёта пользователя):
-      строка с "Дата:"  — номер дня, указан НАД парой колонок (Смена1, Смена2),
-                           т.е. день стоит только в нечётной колонке пары
-      строка с "Смена:" — 1 или 2 для каждой колонки
-      далее построчно   — название конвейера, затем значения по всем колонкам
-
-    Возвращает:
-      daily_by_shift: { day_num: { 1: {kv4:.., ...}, 2: {kv4:.., ...} } }
-      period, used_sheet, error
-    """
     result = {"period": "", "daily_by_shift": {}, "sheets_found": [],
               "used_sheet": "", "error": ""}
 
@@ -456,11 +387,9 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
         result["error"] = f"Не удалось прочитать лист '{sheet_name}': {err}"
         return result
 
-    # Заголовок периода — первая строка с текстом вида "...c 1 по 19"
     if rows and rows[0] and rows[0][0]:
         result["period"] = str(rows[0][0]).strip()
 
-    # Найти строку "Дата:" и строку "Смена:"
     date_row_idx = None
     for i, row in enumerate(rows):
         if row and str(row[0]).strip() in ("Дата:", "Дата"):
@@ -479,8 +408,6 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
     date_row = rows[date_row_idx]
     shift_row = rows[shift_row_idx]
 
-    # Карта колонок: col_idx -> (day_num, shift_num)
-    # День проставлен только в первой колонке пары, поэтому "тащим" значение вперёд
     col_map = {}
     current_day = None
     for col_i in range(1, max(len(date_row), len(shift_row))):
@@ -502,7 +429,6 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
         result["error"] = "Не удалось сопоставить колонки с днями и сменами."
         return result
 
-    # Данные конвейеров построчно
     daily_by_shift = {}
     for row in rows[shift_row_idx + 1:]:
         if not row or not row[0]:
@@ -522,12 +448,10 @@ def parse_report(file_bytes: bytes, filename: str) -> dict:
     return result
 
 
-
 # ════════════════════════════════════════════════════════
-#  ФОРМУЛЫ БАЛАНСА (из Баланс_ДО_2026-1.xlsx, проверено)
+#  ФОРМУЛЫ БАЛАНСА
 # ════════════════════════════════════════════════════════
 def bal1(d: dict) -> Optional[float]:
-    """Баланс 1 = 102+34+24П+24Хв−28А.I−4, % от Конв.4"""
     b = d.get("kv4", 0)
     if not b:
         return None
@@ -536,7 +460,6 @@ def bal1(d: dict) -> Optional[float]:
 
 
 def bal2(d: dict) -> Optional[float]:
-    """Баланс 2 = 101+33−28А.II−3, % от Конв.3"""
     b = d.get("kv3", 0)
     if not b:
         return None
@@ -544,7 +467,6 @@ def bal2(d: dict) -> Optional[float]:
 
 
 def balc1(d: dict) -> Optional[float]:
-    """Баланс С.1 = 102+24Хв+24П+32−28А.I−14"""
     b = d.get("kv4", 0)
     if not b:
         return None
@@ -553,7 +475,6 @@ def balc1(d: dict) -> Optional[float]:
 
 
 def balc2(d: dict) -> Optional[float]:
-    """Баланс С.2 = 101+31−28А.II−15"""
     b = d.get("kv3", 0)
     if not b:
         return None
@@ -579,7 +500,6 @@ def check_norm(val: float, base: float, key: str) -> tuple:
 
 
 def check_doubles(val_main: float, val_dup: float) -> tuple:
-    """Сравнение основных и дублирующих весов. Возвращает (статус, разница%, разница_тонн)."""
     if not val_main or not val_dup:
         return "none", 0.0, 0.0
     diff_t = val_main - val_dup
@@ -628,7 +548,6 @@ def fmt2(v) -> str:
 
 
 def build_alerts(d: dict, label: str = "") -> list:
-    """Возвращает список (level, text) — все нарушения по одной записи."""
     alerts = []
     base4, base3 = d.get("kv4", 0), d.get("kv3", 0)
     prefix = f"[{label}] " if label else ""
@@ -665,7 +584,7 @@ def build_alerts(d: dict, label: str = "") -> list:
 
 
 # ════════════════════════════════════════════════════════
-#  AI АГЕНТ — полный технологический контекст
+#  AI АГЕНТ
 # ════════════════════════════════════════════════════════
 SYSTEM_PROMPT = """Ты — AI-агент метролога горно-обогатительной фабрики (ДОФ), Костанайский регион, Казахстан.
 
@@ -738,8 +657,7 @@ async def ask_ai(question: str, context: str) -> str:
 
 
 def make_ai_context(rows: list) -> str:
-    """Контекст для AI: сводка + список нарушений по полным суткам."""
-    full_days = rows  # все записи в daily_data уже полные сутки
+    full_days = rows
     if not full_days:
         return "Нет завершённых суток с данными."
 
@@ -775,13 +693,22 @@ class AIState(StatesGroup):
 
 
 class StockInput(StatesGroup):
-    waiting_for_prev = State()   # запас за день N-1
-    waiting_for_curr = State()   # запас за день N
+    waiting_for_prev = State()
+    waiting_for_curr = State()
 
 
 class StockNightInput(StatesGroup):
-    waiting_for_night = State()   # запас на конец ночи (до начала смены 1)
-    waiting_for_morning = State() # запас на утро (после смены 1)
+    waiting_for_night = State()
+    waiting_for_morning = State()
+
+def _is_cancel_command(msg: Message) -> bool:
+    """[FIX]: Утилита защиты от залипания FSM. Определяет нажатия кнопок меню."""
+    text = msg.text
+    if not text:
+        return True # Если прислали фото/файл — отменяем ввод
+    # Проверяем, начинается ли текст с эмодзи кнопок или слэша команды
+    prefixes = ("📅", "🌙", "📆", "🗓", "🔔", "🔍", "🏭", "📥", "🌅", "❓", "🤖", "/")
+    return any(text.startswith(p) for p in prefixes)
 
 
 def main_keyboard() -> ReplyKeyboardMarkup:
@@ -859,19 +786,18 @@ async def handle_report(msg: Message):
     )
 
 
-# ── СУТОЧНЫЙ БАЛАНС (полные сутки) ──────────────────────
+# ── СУТОЧНЫЙ БАЛАНС ───────────────────────────────────────
 @dp.message(F.text == "📅 Суточный баланс")
 async def report_daily(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
-    full = rows  # все записи в daily_data уже полные сутки
-    if not full:
+    if not rows:
         await msg.answer("📭 Нет завершённых суток. Загрузите файл отчёта.")
         return
 
     lines = [f"📊 *Суточный баланс ({now.month:02d}/{now.year})*", "_(только завершённые сутки)_\n"]
     lines.append("`Дн  Б1      Б2      Кв4     Кв3`")
-    for r in full:
+    for r in rows:
         b1, b2 = bal1(r), bal2(r)
         lines.append(
             f"`{r['day_num']:>2d}  "
@@ -883,16 +809,13 @@ async def report_daily(msg: Message):
     await msg.answer("\n".join(lines)[:4000], parse_mode="Markdown")
 
 
-# ── НОЧНАЯ СМЕНА (Смена 1 незавершённого дня) ────────────
+# ── НОЧНАЯ СМЕНА ──────────────────────────────────────────
 @dp.message(F.text == "🌙 Ночная смена")
 async def report_night_shift(msg: Message):
     now = datetime.now()
     ns = db_get_night_shift(now.year, now.month)
     if not ns:
-        await msg.answer(
-            "📋 Нет данных по ночной смене.\n"
-            "Загрузите свежий report.xls."
-        )
+        await msg.answer("📋 Нет данных по ночной смене.\nЗагрузите свежий report.xls.")
         return
 
     day_num = ns["day_num"]
@@ -921,12 +844,11 @@ async def report_night_shift(msg: Message):
 async def report_weekly(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
-    full = rows  # все записи в daily_data уже полные сутки
-    if not full:
+    if not rows:
         await msg.answer("📭 Нет завершённых суток.")
         return
 
-    last7 = full[-7:]
+    last7 = rows[-7:]
     s = {k: sum(r.get(k, 0) for r in last7) for k in FIELDS}
     lines = [f"📆 *Сводка за {len(last7)} последних суток*\n"]
     lines.append(f"{em_bal(bal1(s))} Баланс 1: {sign(bal1(s))}")
@@ -942,18 +864,17 @@ async def report_weekly(msg: Message):
 async def report_monthly(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
-    full = rows  # все записи в daily_data уже полные сутки
-    if not full:
+    if not rows:
         await msg.answer("📭 Нет полных данных за месяц.")
         return
 
-    s = {k: sum(r.get(k, 0) for r in full) for k in FIELDS}
+    s = {k: sum(r.get(k, 0) for r in rows) for k in FIELDS}
     b1, b2 = bal1(s), bal2(s)
     bc1, bc2 = balc1(s), balc2(s)
 
     text = (
         f"🗓 *Месячный итог ({now.month:02d}/{now.year})*\n"
-        f"_Учтено суток: {len(full)}, текущая смена исключена_\n\n"
+        f"_Учтено суток: {len(rows)}, текущая смена исключена_\n\n"
         f"━━ 1 очередь ━━\n"
         f"Конв.4: {fmt(s['kv4'])}т (осн.)   Конв.4Д: {fmt(s['kv4d'])}т (дубл.)\n"
         f"Конв.14: {fmt(s['kv14'])}т  ({pct(s['kv14'],s['kv4']):.0f}%)\n"
@@ -978,16 +899,14 @@ async def report_monthly(msg: Message):
 async def report_alerts(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
-    full = rows  # все записи в daily_data уже полные сутки
-    if not full:
+    if not rows:
         await msg.answer("📭 Нет завершённых суток.")
         return
 
     all_alerts = []
-    for r in full:
+    for r in rows:
         all_alerts.extend(build_alerts(r, label=f"д.{r['day_num']}"))
 
-    # Алерты по складу концентрата
     stock_history = db_get_stock_history(now.year, now.month)
     stock_alerts = []
     for r in stock_history:
@@ -1027,14 +946,13 @@ async def report_alerts(msg: Message):
 async def report_doubles(msg: Message):
     now = datetime.now()
     rows = db_get_month_data(now.year, now.month)
-    full = rows  # все записи в daily_data уже полные сутки
-    if not full:
+    if not rows:
         await msg.answer("📭 Нет завершённых суток.")
         return
 
     lines = ["🔍 *Расхождение основных и дублирующих весов*", "_норма <0.5%, критично >2%_\n"]
     lines.append("`Дн  Кв4 vs 4Д     Кв3 vs 3Д`")
-    for r in full:
+    for r in rows:
         st4, p4, _ = check_doubles(r.get("kv4", 0), r.get("kv4d", 0))
         st3, p3, _ = check_doubles(r.get("kv3", 0), r.get("kv3d", 0))
         lines.append(f"`{r['day_num']:>2d}   {em_dup(st4)}{p4:>5.2f}%      {em_dup(st3)}{p3:>5.2f}%`")
@@ -1061,12 +979,13 @@ async def report_stock(msg: Message):
     for r in history:
         nesovp = r.get("nesovpadenie", 0)
         em = "🚨" if abs(nesovp) > STOCK_DIFF_WARN else "✅"
+        # [FIX]: Убран знак '+', вызывавший ошибку "Sign not allowed in string format specifier"
         lines.append(
             f"`{r['day_num']:>2d}  "
             f"{fmt2(r.get('produced',0)):>7s}  "
             f"{fmt2(r.get('shipped',0)):>7s}  "
-            f"{fmt2(r.get('ves_izm',0)):>+7s}  "
-            f"{fmt2(r.get('marksh_izm',0)):>+7s}  "
+            f"{fmt2(r.get('ves_izm',0)):>7s}  "
+            f"{fmt2(r.get('marksh_izm',0)):>7s}  "
             f"{em}{nesovp:+.0f}`"
         )
 
@@ -1082,7 +1001,7 @@ async def report_stock(msg: Message):
     await msg.answer("\n".join(lines)[:4000], parse_mode="Markdown")
 
 
-# ── ВВОД ЗАПАСОВ СКЛАДА (2 числа: за N-1 и за N) ─────────
+# ── ВВОД ЗАПАСОВ СКЛАДА ──────────────────────────────────
 @dp.message(F.text == "📥 Ввести запас")
 async def stock_input_start(msg: Message, state: FSMContext):
     now = datetime.now()
@@ -1094,21 +1013,32 @@ async def stock_input_start(msg: Message, state: FSMContext):
         )
         return
 
-    # Последний полный день в отчёте (напр. день 18 при скачивании 19-го)
-    day_num = rows[-1]["day_num"]
-    await state.update_data(day_num=day_num, year=now.year, month=now.month)
+    row = rows[-1]
+    day_num = row["day_num"]
+    # [FIX]: Берем месяц и год из данных базы, а не из datetime.now() 
+    # Это чинит вывод, если вносят данные за прошлый месяц.
+    db_year = row["year"]
+    db_month = row["month"]
+
+    await state.update_data(day_num=day_num, year=db_year, month=db_month)
     await state.set_state(StockInput.waiting_for_prev)
 
     await msg.answer(
-        f"📥 *Склад влажного концентрата — день {day_num:02d}.{now.month:02d}*\n\n"
+        f"📥 *Склад влажного концентрата — день {day_num:02d}.{db_month:02d}*\n\n"
         f"Шаг 1 из 2\n"
-        f"Введите запас на складе на конец *{day_num-1:02d}.{now.month:02d}* (тонн):",
+        f"Введите запас на складе на конец *{day_num-1:02d}.{db_month:02d}* (тонн):",
         parse_mode="Markdown"
     )
 
 
 @dp.message(StockInput.waiting_for_prev)
 async def stock_input_prev(msg: Message, state: FSMContext):
+    # [FIX]: Прерываем ввод, если нажата кнопка меню, чтобы FSM не залипал
+    if _is_cancel_command(msg):
+        await state.clear()
+        await msg.answer("Действие отменено. Выберите команду из меню заново.")
+        return
+
     try:
         stock_prev = float(msg.text.strip().replace(",", ".").replace(" ", ""))
     except ValueError:
@@ -1120,16 +1050,22 @@ async def stock_input_prev(msg: Message, state: FSMContext):
     await state.set_state(StockInput.waiting_for_curr)
 
     day_num = data["day_num"]
-    now_month = data["month"]
+    db_month = data["month"]
     await msg.answer(
         f"Шаг 2 из 2\n"
-        f"Введите запас на складе на конец *{day_num:02d}.{now_month:02d}* (тонн):",
+        f"Введите запас на складе на конец *{day_num:02d}.{db_month:02d}* (тонн):",
         parse_mode="Markdown"
     )
 
 
 @dp.message(StockInput.waiting_for_curr)
 async def stock_input_curr(msg: Message, state: FSMContext):
+    # [FIX]: Защита FSM
+    if _is_cancel_command(msg):
+        await state.clear()
+        await msg.answer("Действие отменено. Выберите команду из меню заново.")
+        return
+
     try:
         stock_curr = float(msg.text.strip().replace(",", ".").replace(" ", ""))
     except ValueError:
@@ -1175,45 +1111,52 @@ async def stock_input_curr(msg: Message, state: FSMContext):
     await msg.answer("\n".join(lines), parse_mode="Markdown")
 
 
-# ── СКЛАД — НОЧНАЯ СМЕНА (утренний расчёт по Смене 1) ────
+# ── СКЛАД — НОЧНАЯ СМЕНА ─────────────────────────────────
 @dp.message(F.text == "🌅 Склад — ночная смена")
 async def stock_night_start(msg: Message, state: FSMContext):
     now = datetime.now()
     ns = db_get_night_shift(now.year, now.month)
     if not ns:
         await msg.answer(
-            "📭 Нет данных по ночной смене.\n"
-            "Сначала загрузите *report.xls*.",
+            "📭 Нет данных по ночной смене.\nСначала загрузите *report.xls*.",
             parse_mode="Markdown"
         )
         return
 
     day_num  = ns["day_num"]
+    db_year  = ns["year"]    # [FIX]: Берем месяц и год из базы данных
+    db_month = ns["month"]
     produced = calc_produced(ns)
     shipped  = calc_shipped(ns)
 
     await state.update_data(
         day_num=day_num,
-        year=now.year,
-        month=now.month,
+        year=db_year,
+        month=db_month,
         produced=produced,
         shipped=shipped,
     )
     await state.set_state(StockNightInput.waiting_for_night)
 
     await msg.answer(
-        f"🌅 *Склад — ночная смена {day_num:02d}.{now.month:02d}*\n\n"
+        f"🌅 *Склад — ночная смена {day_num:02d}.{db_month:02d}*\n\n"
         f"_Смена 1 (19:30–07:30) из отчёта:_\n"
         f"⚙️ Произведено: {fmt(produced)} т\n"
         f"🚂 Отгружено:   {fmt(shipped)} т\n\n"
         f"Шаг 1 из 2\n"
-        f"Введите запас на складе на *начало смены* (вечер {day_num-1:02d}.{now.month:02d}, тонн):",
+        f"Введите запас на складе на *начало смены* (вечер {day_num-1:02d}.{db_month:02d}, тонн):",
         parse_mode="Markdown"
     )
 
 
 @dp.message(StockNightInput.waiting_for_night)
 async def stock_night_prev(msg: Message, state: FSMContext):
+    # [FIX]: Защита FSM
+    if _is_cancel_command(msg):
+        await state.clear()
+        await msg.answer("Действие отменено. Выберите команду из меню заново.")
+        return
+
     try:
         stock_night = float(msg.text.strip().replace(",", ".").replace(" ", ""))
     except ValueError:
@@ -1235,6 +1178,12 @@ async def stock_night_prev(msg: Message, state: FSMContext):
 
 @dp.message(StockNightInput.waiting_for_morning)
 async def stock_night_curr(msg: Message, state: FSMContext):
+    # [FIX]: Защита FSM
+    if _is_cancel_command(msg):
+        await state.clear()
+        await msg.answer("Действие отменено. Выберите команду из меню заново.")
+        return
+
     try:
         stock_morning = float(msg.text.strip().replace(",", ".").replace(" ", ""))
     except ValueError:
@@ -1292,6 +1241,12 @@ async def ai_request(msg: Message, state: FSMContext):
 
 @dp.message(AIState.waiting_for_question)
 async def ai_processing(msg: Message, state: FSMContext):
+    # [FIX]: Защита FSM
+    if _is_cancel_command(msg):
+        await state.clear()
+        await msg.answer("Диалог с AI отменен. Выберите команду меню.")
+        return
+
     await state.clear()
     wait = await msg.answer("⏳ Анализирую...")
     now = datetime.now()
