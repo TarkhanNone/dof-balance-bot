@@ -1293,4 +1293,11 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    print("=== СТАРТ ПРИЛОЖЕНИЯ ===")
+    try:
+        print(f"BOT_TOKEN установлен: {bool(BOT_TOKEN)}")
+        asyncio.run(main())
+    except Exception as e:
+        print(f"ОШИБКА ПРИ ЗАПУСКЕ: {e}", file=sys.stderr)
+        raise e
